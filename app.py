@@ -1,5 +1,6 @@
 import streamlit as st
-from google import genai
+import requests
+import json
 import os
 
 # --- PAGE CONFIGURATION ---
@@ -16,56 +17,65 @@ st.markdown("""
     .stApp { background-color: #0E1117; color: #FAFAFA; }
     .stButton>button { width: 100%; border-radius: 5px; background-color: #262730; color: #ffffff; border: 1px solid #4B4B4B; }
     .stButton>button:hover { border-color: #00FF00; color: #00FF00; }
-    .success-msg { color: #00FF00; font-size: 0.8rem; }
-    .error-msg { color: #FF4B4B; font-size: 0.8rem; }
+    div[data-testid="stExpander"] { border: 1px solid #30363D; border-radius: 5px; }
 </style>
 """, unsafe_allow_html=True)
 
 # --- API SETUP ---
 try:
-    api_key = st.secrets["GEMINI_API_KEY"]
+    API_KEY = st.secrets["GEMINI_API_KEY"]
 except (FileNotFoundError, KeyError):
-    api_key = os.getenv("GEMINI_API_KEY")
+    API_KEY = os.getenv("GEMINI_API_KEY")
 
-if not api_key:
-    st.error("⚠️ SYSTEM ALERT: API Key missing. Please configure GEMINI_API_KEY in Streamlit Secrets.")
+if not API_KEY:
+    st.error("⚠️ CRITICAL: API Key missing. Configure GEMINI_API_KEY in Secrets.")
     st.stop()
 
-client = genai.Client(api_key=api_key)
-
-# --- ROBUST MODEL SELECTOR ---
-# This list acts as a fallback chain. If the first fails, it tries the next.
-MODEL_CHAIN = [
-    "gemini-2.0-flash",        # Bleeding edge
-    "gemini-1.5-flash",        # Standard Fast
-    "gemini-1.5-flash-001",    # Specific Version
-    "gemini-1.5-flash-002",    # Specific Version 2
-    "gemini-1.5-pro",          # Standard Pro
-    "gemini-1.0-pro",          # Legacy Stable
-    "gemini-pro"               # Universal Alias
-]
-
-def generate_content_safe(prompt_text):
-    """Iterates through models until one works."""
-    last_error = None
+# --- BARE METAL API FUNCTION ---
+def query_gemini_api(prompt_text):
+    """
+    Sends a direct HTTP REST request to Google, bypassing the SDK.
+    This is the 'Platform Admin' way to ensure connectivity.
+    """
+    # We use the Stable 1.5 Flash endpoint
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
     
-    for model_name in MODEL_CHAIN:
-        try:
-            # Attempt to generate with current model
-            response = client.models.generate_content(
-                model=model_name, 
-                contents=prompt_text
-            )
-            # If successful, return the text and the working model name
-            return response.text, model_name
-            
-        except Exception as e:
-            # If 404 or 429, save error and continue to next model
-            last_error = e
-            continue
-            
-    # If we run out of models, throw the last error
-    raise last_error
+    headers = {'Content-Type': 'application/json'}
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt_text}]
+        }]
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, data=json.dumps(payload))
+        
+        # Check for HTTP 200 (Success)
+        if response.status_code == 200:
+            return response.json()['candidates'][0]['content']['parts'][0]['text']
+        else:
+            # If 1.5 Flash fails (404), failover to Legacy Pro automatically
+            if response.status_code == 404:
+                return query_gemini_legacy(prompt_text)
+            else:
+                st.error(f"API Error {response.status_code}: {response.text}")
+                return None
+                
+    except Exception as e:
+        st.error(f"Connection Protocol Failure: {e}")
+        return None
+
+def query_gemini_legacy(prompt_text):
+    """Failover to the legacy model endpoint"""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={API_KEY}"
+    headers = {'Content-Type': 'application/json'}
+    payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
+    response = requests.post(url, headers=headers, data=json.dumps(payload))
+    if response.status_code == 200:
+        return response.json()['candidates'][0]['content']['parts'][0]['text']
+    else:
+        st.error(f"Legacy Failover Failed {response.status_code}: {response.text}")
+        return None
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -85,16 +95,14 @@ with st.sidebar:
     )
     difficulty = st.select_slider("Simulation Difficulty", options=["Associate", "Professional", "Chief Architect"])
     st.divider()
-    st.caption("System Status: **ONLINE**")
+    st.caption("Protocol: **REST / HTTP 1.1**")
 
 # --- MAIN APP ---
 st.title("CYBERPREP // AI")
 st.markdown("### GRC & Security Architecture Simulator")
 
 if st.button("GENERATE NEW SCENARIO"):
-    status_box = st.empty()
-    
-    with st.spinner("Initializing Neural Network... Hunting for active model uplink..."):
+    with st.spinner("Transmitting Payload to Neural Network..."):
         prompt = f"""
         Act as a CISSP exam creator. Create a {difficulty}-level scenario for: {selected_domain}.
         Format exactly as:
@@ -110,22 +118,12 @@ if st.button("GENERATE NEW SCENARIO"):
         **EXPLANATION:** [Text]
         """
         
-        try:
-            # Call the smart generator
-            result_text, working_model = generate_content_safe(prompt)
-            
-            # Save to session
-            st.session_state.current_question = result_text
-            st.session_state.last_model = working_model
-            
-        except Exception as e:
-            st.error(f"CRITICAL FAILURE: All model uplinks failed. \nLast Error: {str(e)}")
+        result = query_gemini_api(prompt)
+        if result:
+            st.session_state.current_question = result
 
 # --- DISPLAY ---
 if "current_question" in st.session_state and st.session_state.current_question:
-    # Show which model actually worked (for your info)
-    st.markdown(f"<p class='success-msg'> // CONNECTED VIA: {st.session_state.get('last_model', 'UNKNOWN')}</p>", unsafe_allow_html=True)
-    
     try:
         parts = st.session_state.current_question.split("---")
         st.markdown(parts[0])
