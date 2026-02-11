@@ -16,24 +16,56 @@ st.markdown("""
     .stApp { background-color: #0E1117; color: #FAFAFA; }
     .stButton>button { width: 100%; border-radius: 5px; background-color: #262730; color: #ffffff; border: 1px solid #4B4B4B; }
     .stButton>button:hover { border-color: #00FF00; color: #00FF00; }
-    div[data-testid="stExpander"] { border: 1px solid #30363D; border-radius: 5px; }
+    .success-msg { color: #00FF00; font-size: 0.8rem; }
+    .error-msg { color: #FF4B4B; font-size: 0.8rem; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- API SETUP (NEW SDK) ---
+# --- API SETUP ---
 try:
-    # Try getting key from Streamlit Secrets first
     api_key = st.secrets["GEMINI_API_KEY"]
 except (FileNotFoundError, KeyError):
-    # Fallback to local environment variable
     api_key = os.getenv("GEMINI_API_KEY")
 
 if not api_key:
     st.error("⚠️ SYSTEM ALERT: API Key missing. Please configure GEMINI_API_KEY in Streamlit Secrets.")
     st.stop()
 
-# Initialize the new Client
 client = genai.Client(api_key=api_key)
+
+# --- ROBUST MODEL SELECTOR ---
+# This list acts as a fallback chain. If the first fails, it tries the next.
+MODEL_CHAIN = [
+    "gemini-2.0-flash",        # Bleeding edge
+    "gemini-1.5-flash",        # Standard Fast
+    "gemini-1.5-flash-001",    # Specific Version
+    "gemini-1.5-flash-002",    # Specific Version 2
+    "gemini-1.5-pro",          # Standard Pro
+    "gemini-1.0-pro",          # Legacy Stable
+    "gemini-pro"               # Universal Alias
+]
+
+def generate_content_safe(prompt_text):
+    """Iterates through models until one works."""
+    last_error = None
+    
+    for model_name in MODEL_CHAIN:
+        try:
+            # Attempt to generate with current model
+            response = client.models.generate_content(
+                model=model_name, 
+                contents=prompt_text
+            )
+            # If successful, return the text and the working model name
+            return response.text, model_name
+            
+        except Exception as e:
+            # If 404 or 429, save error and continue to next model
+            last_error = e
+            continue
+            
+    # If we run out of models, throw the last error
+    raise last_error
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -60,7 +92,9 @@ st.title("CYBERPREP // AI")
 st.markdown("### GRC & Security Architecture Simulator")
 
 if st.button("GENERATE NEW SCENARIO"):
-    with st.spinner("Initializing Neural Network..."):
+    status_box = st.empty()
+    
+    with st.spinner("Initializing Neural Network... Hunting for active model uplink..."):
         prompt = f"""
         Act as a CISSP exam creator. Create a {difficulty}-level scenario for: {selected_domain}.
         Format exactly as:
@@ -77,25 +111,21 @@ if st.button("GENERATE NEW SCENARIO"):
         """
         
         try:
-            # NEW SDK CALL SYNTAX
-            response = client.models.generate_content(
-                model='gemini-2.0-flash', 
-                contents=prompt
-            )
-            st.session_state.current_question = response.text
+            # Call the smart generator
+            result_text, working_model = generate_content_safe(prompt)
+            
+            # Save to session
+            st.session_state.current_question = result_text
+            st.session_state.last_model = working_model
+            
         except Exception as e:
-            # Fallback to stable model if Flash fails
-            try:
-                response = client.models.generate_content(
-                    model='gemini-1.5-flash', 
-                    contents=prompt
-                )
-                st.session_state.current_question = response.text
-            except Exception as e2:
-                st.error(f"Connection Failed: {str(e2)}")
+            st.error(f"CRITICAL FAILURE: All model uplinks failed. \nLast Error: {str(e)}")
 
 # --- DISPLAY ---
 if "current_question" in st.session_state and st.session_state.current_question:
+    # Show which model actually worked (for your info)
+    st.markdown(f"<p class='success-msg'> // CONNECTED VIA: {st.session_state.get('last_model', 'UNKNOWN')}</p>", unsafe_allow_html=True)
+    
     try:
         parts = st.session_state.current_question.split("---")
         st.markdown(parts[0])
