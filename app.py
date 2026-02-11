@@ -32,12 +32,11 @@ if not API_KEY:
     st.error("⚠️ CRITICAL: API Key missing. Configure GEMINI_API_KEY in Secrets.")
     st.stop()
 
-# --- DYNAMIC SERVICE DISCOVERY (The Fix) ---
+# --- DYNAMIC SERVICE DISCOVERY ---
 @st.cache_resource
 def discover_active_model():
     """
-    Queries Google to find WHICH models are actually available to this API Key.
-    This prevents 404 errors by never guessing the model name.
+    Finds the best available model, strictly avoiding restricted 'limit: 0' models.
     """
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
     try:
@@ -46,21 +45,30 @@ def discover_active_model():
             return None, f"Error {response.status_code}: {response.text}"
         
         data = response.json()
-        
-        # Priority list of keywords we want (Newest to Oldest)
-        preferences = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.0-pro", "gemini-pro"]
-        
         available_models = [m['name'] for m in data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
         
-        # 1. Try to find a preferred model
+        # --- SAFE MODEL PRIORITY LIST ---
+        # We REMOVED 'gemini-2.0-flash' because it causes Quota 429 errors.
+        # We prioritize 1.5-flash because it is the "High Volume" free tier model.
+        preferences = [
+            "gemini-1.5-flash",          # BEST: Fast, Free, High Limits
+            "gemini-1.5-flash-latest",   # Backup alias
+            "gemini-1.5-flash-001",      # Specific version
+            "gemini-1.5-pro",            # Slower, but powerful
+            "gemini-1.0-pro",            # Legacy Stable
+            "gemini-pro"                 # Oldest alias
+        ]
+        
+        # 1. Check for preferred models in order
         for pref in preferences:
             for model in available_models:
                 if pref in model:
+                    # Found a safe match!
                     return model, "OK"
         
-        # 2. If no preferred model, just grab the first valid Gemini model
+        # 2. Fallback: If no preferred model found, grab the first one that ISN'T 2.0
         for model in available_models:
-            if "gemini" in model:
+            if "gemini" in model and "2.0" not in model:
                 return model, "OK"
                 
         return None, "NO_VALID_MODELS_FOUND"
@@ -75,10 +83,11 @@ ACTIVE_MODEL, STATUS_MSG = discover_active_model()
 with st.sidebar:
     st.title("🛡️ COMMAND CENTER")
     
-    # Show Connection Status
     if ACTIVE_MODEL:
+        # Clean up the model name for display (remove 'models/' prefix)
+        display_name = ACTIVE_MODEL.replace("models/", "")
         st.markdown(f"**System Status:** <span class='status-ok'>ONLINE</span>", unsafe_allow_html=True)
-        st.markdown(f"**Uplink:** `{ACTIVE_MODEL}`")
+        st.markdown(f"**Uplink:** `{display_name}`")
     else:
         st.markdown(f"**System Status:** <span class='status-err'>OFFLINE</span>", unsafe_allow_html=True)
         st.error(f"Discovery Failed: {STATUS_MSG}")
@@ -107,7 +116,6 @@ def query_gemini_direct(prompt_text):
         return None
 
     # Use the discovered model name directly
-    # Note: ACTIVE_MODEL usually comes as "models/gemini-1.5-flash" so we just use it
     url = f"https://generativelanguage.googleapis.com/v1beta/{ACTIVE_MODEL}:generateContent?key={API_KEY}"
     
     headers = {'Content-Type': 'application/json'}
@@ -123,8 +131,13 @@ def query_gemini_direct(prompt_text):
         if response.status_code == 200:
             return response.json()['candidates'][0]['content']['parts'][0]['text']
         else:
-            st.error(f"Generation Error {response.status_code}: {response.text}")
-            return None
+            # If we hit a random 429 even on a safe model, tell the user to wait
+            if response.status_code == 429:
+                st.warning("⚠️ High Traffic: API Limit Reached. Please wait 10 seconds and try again.")
+                return None
+            else:
+                st.error(f"Generation Error {response.status_code}: {response.text}")
+                return None
     except Exception as e:
         st.error(f"Protocol Failure: {e}")
         return None
@@ -137,7 +150,7 @@ if st.button("GENERATE NEW SCENARIO"):
     if not ACTIVE_MODEL:
         st.error("Mission Aborted: System Offline")
     else:
-        with st.spinner(f"Contacting {ACTIVE_MODEL}..."):
+        with st.spinner(f"Contacting Neural Network..."):
             prompt = f"""
             Act as a CISSP exam creator. Create a {difficulty}-level scenario for: {selected_domain}.
             Format exactly as:
