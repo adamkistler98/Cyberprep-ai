@@ -51,4 +51,4 @@ This project demonstrates skills in **Platform Administration**, **AI Integratio
 * **Availability:** Designed as a stateless microservice for high availability.
 
 ---
-*Created by [Your Name]*
+*Created by Adam Kistler*
